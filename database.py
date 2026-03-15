@@ -573,6 +573,150 @@ def reply_ticket(tid, reply_text):
     db.execute("UPDATE tickets SET reply=?, status='closed' WHERE id=?", (reply_text, tid))
     db.commit()
     db.close()
+r_id)).fetchone()
+    if not row:
+        db.close()
+        return False, 0, 0
+
+    last   = row['last_daily']
+    streak = row['daily_streak'] or 0
+
+    if last == today:
+        db.close()
+        return False, 0, streak
+
+    yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+    streak    = (streak + 1) if last == yesterday else 1
+    base      = float(get_setting(token, 'daily_bonus', 2))
+    bonus     = round(base + (streak - 1) * 0.5, 2)
+
+    db.execute('UPDATE users SET balance=balance+?, last_daily=?, daily_streak=? WHERE bot_token=? AND user_id=?',
+               (bonus, today, streak, token, user_id))
+    db.commit()
+    db.close()
+    return True, bonus, streak
+
+
+# ── Force Channels ────────────────────────────────────────────
+
+def add_channel(token, channel_id, name, invite):
+    db = get_conn()
+    try:
+        db.execute('INSERT INTO force_channels (bot_token,channel_id,channel_name,invite_link) VALUES (?,?,?,?)',
+                   (token, str(channel_id), name, invite))
+        db.commit()
+        result = True
+    except sqlite3.IntegrityError:
+        result = False
+    db.close()
+    return result
+
+
+def remove_channel(token, channel_id):
+    db = get_conn()
+    db.execute('DELETE FROM force_channels WHERE bot_token=? AND channel_id=?', (token, str(channel_id)))
+    db.commit()
+    db.close()
+
+
+def get_channels(token):
+    db   = get_conn()
+    rows = db.execute('SELECT * FROM force_channels WHERE bot_token=?', (token,)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+# ── Withdrawals ───────────────────────────────────────────────
+
+def create_withdrawal(token, user_id, amount, method, address):
+    db = get_conn()
+    db.execute('UPDATE users SET balance=balance-? WHERE bot_token=? AND user_id=?', (amount, token, user_id))
+    db.execute('INSERT INTO withdrawals (bot_token,user_id,amount,method,address) VALUES (?,?,?,?,?)',
+               (token, user_id, amount, method, address))
+    db.commit()
+    wid = db.execute('SELECT last_insert_rowid() as id').fetchone()['id']
+    db.close()
+    return wid
+
+
+def get_pending_withdrawals(token):
+    db   = get_conn()
+    rows = db.execute('''SELECT w.*, u.username, u.first_name
+                         FROM withdrawals w
+                         LEFT JOIN users u ON w.bot_token=u.bot_token AND w.user_id=u.user_id
+                         WHERE w.bot_token=? AND w.status='pending'
+                         ORDER BY w.created_at''', (token,)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+def update_withdrawal(wid, status, reason=''):
+    db = get_conn()
+    db.execute('UPDATE withdrawals SET status=?, reject_reason=? WHERE id=?', (status, reason, wid))
+    if status == 'rejected':
+        row = db.execute('SELECT bot_token, user_id, amount FROM withdrawals WHERE id=?', (wid,)).fetchone()
+        if row:
+            db.execute('UPDATE users SET balance=balance+? WHERE bot_token=? AND user_id=?',
+                       (row['amount'], row['bot_token'], row['user_id']))
+    db.commit()
+    db.close()
+
+
+def get_withdrawal(wid):
+    db  = get_conn()
+    row = db.execute('SELECT * FROM withdrawals WHERE id=?', (wid,)).fetchone()
+    db.close()
+    return dict(row) if row else None
+
+
+# ── Milestones ────────────────────────────────────────────────
+
+def add_milestone(token, ref_count, bonus):
+    db = get_conn()
+    try:
+        db.execute('INSERT INTO milestones (bot_token,ref_count,bonus) VALUES (?,?,?)', (token, ref_count, bonus))
+        db.commit()
+        result = True
+    except Exception:
+        result = False
+    db.close()
+    return result
+
+
+def get_milestones(token):
+    db   = get_conn()
+    rows = db.execute('SELECT * FROM milestones WHERE bot_token=? ORDER BY ref_count', (token,)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+# ── Tickets ───────────────────────────────────────────────────
+
+def create_ticket(token, user_id, message):
+    db = get_conn()
+    db.execute('INSERT INTO tickets (bot_token,user_id,message) VALUES (?,?,?)', (token, user_id, message))
+    db.commit()
+    tid = db.execute('SELECT last_insert_rowid() as id').fetchone()['id']
+    db.close()
+    return tid
+
+
+def get_open_tickets(token):
+    db   = get_conn()
+    rows = db.execute('''SELECT t.*, u.username, u.first_name
+                         FROM tickets t
+                         LEFT JOIN users u ON t.bot_token=u.bot_token AND t.user_id=u.user_id
+                         WHERE t.bot_token=? AND t.status='open'
+                         ORDER BY t.created_at''', (token,)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+def reply_ticket(tid, reply_text):
+    db = get_conn()
+    db.execute("UPDATE tickets SET reply=?, status='closed' WHERE id=?", (reply_text, tid))
+    db.commit()
+    db.close()
         balance       REAL    DEFAULT 0,
         total_refs    INTEGER DEFAULT 0,
         level2_refs   INTEGER DEFAULT 0,
